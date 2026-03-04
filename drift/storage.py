@@ -121,14 +121,6 @@ def save_coil_stats(base_dir: str | Path, db_label: str, stats: dict) -> None:
         f.write(f"{stats['coil_id']}\n")
 
 
-def load_processed_coils(base_dir: str | Path, db_label: str) -> set[str]:
-    """Return the set of coil IDs that have already been processed."""
-    path = _db_dir(base_dir, db_label) / "processed_coils.txt"
-    if not path.exists():
-        return set()
-    with open(path, "r", encoding="utf-8") as f:
-        return {line.strip() for line in f if line.strip()}
-
 
 def load_last_processed_coil(base_dir: str | Path, db_label: str) -> str | None:
     """Return the most recently processed coil ID (last line of the log)."""
@@ -142,6 +134,37 @@ def load_last_processed_coil(base_dir: str | Path, db_label: str) -> str | None:
             if stripped:
                 last = stripped
     return last
+
+
+def load_all_confidence(base_dir: str | Path, db_labels: list[str] | None = None) -> pd.DataFrame:
+    """Load and concatenate all per-coil confidence describe() parquets.
+
+    Returns a DataFrame with columns from describe() + coil_id + fetched_at.
+    The index is ``defectclass``.
+    """
+    base = Path(base_dir)
+    if not base.exists():
+        return pd.DataFrame()
+
+    if db_labels is None:
+        db_labels = [
+            d.name for d in sorted(base.iterdir())
+            if d.is_dir() and (d / "confidence").is_dir()
+        ]
+
+    frames = []
+    for label in db_labels:
+        conf_dir = base / label / "confidence"
+        if not conf_dir.exists():
+            continue
+        for f in sorted(conf_dir.glob("*.parquet")):
+            df = pd.read_parquet(f)
+            df["db_label"] = label
+            frames.append(df)
+
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=False)
 
 
 def load_all_summaries(base_dir: str | Path, db_labels: list[str] | None = None) -> pd.DataFrame:

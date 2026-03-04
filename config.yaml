@@ -1,11 +1,11 @@
 # ── Mode ────────────────────────────────────────────────────────
 # true  = auto-polling (watcher connects to all DBs on a timer)
 # false = manual mode  (queries only on button press, with date range)
-live: true
+live: false
 
 # ── Databases (one or more) ─────────────────────────────────────
 databases:
-  - label: "main"
+  - label: "demo"
     host: "localhost"
     port: 5432
     dbname: "defects"
@@ -16,7 +16,7 @@ databases:
     # in manual mode).  Leave empty if table has no such column.
     timestamp_column: "created_at"
 
-  # Uncomment to add a second database:
+  # для потенциально второй бд
   # - label: "secondary"
   #   host: "10.0.0.2"
   #   port: 5432

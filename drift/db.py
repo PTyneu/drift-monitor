@@ -10,7 +10,7 @@ Design goals
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 import psycopg2
@@ -74,10 +74,13 @@ def fetch_new_coils(cfg: DbConfig, after: str | None = None) -> list[str]:
 
 def fetch_coils_in_range(
     cfg: DbConfig,
-    date_from: date | None = None,
-    date_to: date | None = None,
+    date_from: date | datetime | None = None,
+    date_to: date | datetime | None = None,
 ) -> list[str]:
-    """Return distinct coil IDs within a date range.
+    """Return distinct coil IDs within a date/datetime range.
+
+    Accepts both ``date`` and ``datetime`` objects.  psycopg2 handles both
+    transparently (``date`` → SQL DATE, ``datetime`` → SQL TIMESTAMP).
 
     Requires ``cfg.timestamp_column`` to be set.  If the column is not
     configured, falls back to returning all distinct coil IDs (no date filter).

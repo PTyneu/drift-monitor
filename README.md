@@ -1,7 +1,7 @@
 # Drift Monitor
 
-Сервис мониторинга табличного дрифта данных 
-Поддерживает два режима работы и подключение к нескольким БД параллельно.
+Сервис мониторинга табличного дрифта данных.
+Поддерживает два режима работы, подключение к нескольким БД параллельно, сравнение периодов и фильтрацию по дате+времени.
 
 ## Два режима работы
 
@@ -9,32 +9,33 @@
 
 ```
 CoilWatcher (фоновый поток)
-  │
-  ├─ DB "main"     ──► WHERE coilid > watermark ──► Stats ──► Parquet
-  ├─ DB "secondary" ──► WHERE coilid > watermark ──► Stats ──► Parquet
-  │
-  └─ sleep(poll_interval_sec) ──► повтор
+  |
+  +-- DB "main"      --> WHERE coilid > watermark --> Stats --> Parquet
+  +-- DB "secondary"  --> WHERE coilid > watermark --> Stats --> Parquet
+  |
+  +-- sleep(poll_interval_sec) --> повтор
 ```
 
 - Фоновый поток опрашивает **все** настроенные БД каждые N секунд.
 - Watermark (последний обработанный coilid) хранится в памяти — один параметр в SQL.
-- Кнопка «Run check now» запускает внеочередную проверку.
+- Кнопка «Проверить сейчас» запускает внеочередную проверку.
 
 ### Manual (`live: false`)
 
 ```
 Пользователь в Streamlit UI
-  │
-  ├─ Выбирает даты (по умолчанию: последняя неделя)
-  ├─ Выбирает БД (чекбоксы)
-  ├─ Жмёт "Run query"
-  │
-  └─► SQL: WHERE created_at >= %s AND created_at < %s
-       └─► Stats ──► Parquet
+  |
+  +-- Выбирает дату + время (по умолчанию: последняя неделя)
+  +-- Выбирает БД (чекбоксы)
+  +-- Жмёт "Запустить запрос"
+  |
+  +---> SQL: WHERE created_at >= %s AND created_at < %s
+         +---> Stats --> Parquet
 ```
 
 - Никакого фонового потока — запросы только по кнопке.
 - Фильтрация по `timestamp_column` из конфига (например `created_at`).
+- Поддержка дата+время (datetime) для точных диапазонов.
 - Если даты не указаны — берётся последняя неделя.
 - Если `timestamp_column` не задан — загружаются все рулоны (без фильтра по дате).
 
@@ -86,7 +87,7 @@ storage:
 | `defect_counts` | Количество дефектов каждого класса |
 | `confidence_stats` | `describe()` по confidence для каждого класса |
 | `class_change_summary` | Сколько дефектов изменили класс (`rawdefectclass != defectclass`) |
-| `class_change_matrix` | Матрица переходов raw → final |
+| `class_change_matrix` | Матрица переходов raw -> final |
 | `class_change_top` | Самые частые переходы между классами |
 | `bbox_stats` | `describe()` по ширине, высоте, площади и aspect ratio bbox |
 | `spatial_stats` | Статистика центров bbox (mean/std cx, cy) |
@@ -98,20 +99,20 @@ storage:
 
 ```
 storage/
-├── main/                     # label первой БД
-│   ├── coil_stats/
-│   │   ├── COIL_001.parquet
-│   │   └── COIL_002.parquet
-│   ├── confidence/
-│   ├── class_changes/
-│   ├── class_change_top/
-│   ├── bbox/
-│   ├── spatial/
-│   ├── conf_buckets/
-│   └── processed_coils.txt
-├── secondary/                # label второй БД
-│   ├── coil_stats/
-│   └── ...
++-- main/                     # label первой БД
+|   +-- coil_stats/
+|   |   +-- COIL_001.parquet
+|   |   +-- COIL_002.parquet
+|   +-- confidence/
+|   +-- class_changes/
+|   +-- class_change_top/
+|   +-- bbox/
+|   +-- spatial/
+|   +-- conf_buckets/
+|   +-- processed_coils.txt
++-- secondary/                # label второй БД
+|   +-- coil_stats/
+|   +-- ...
 ```
 
 Каждая БД хранит данные в своей поддиректории — coilid из разных БД не пересекаются.
@@ -125,16 +126,27 @@ streamlit run app.py
 
 ## Streamlit UI
 
-**Live mode:**
-- «Run check now» — внеочередная проверка всех БД
-- «Start/Stop background watcher» — управление фоновым потоком
-- Фильтр результатов по дате и по БД
+Интерфейс на русском языке.
 
-**Manual mode:**
-- Date range (From / To) — по умолчанию последняя неделя
+**Live-режим:**
+- «Проверить сейчас» — внеочередная проверка всех БД
+- «Запустить/Остановить фоновый мониторинг» — управление фоновым потоком
+
+**Ручной режим:**
+- Дата+время (от/до) — по умолчанию последняя неделя
 - Мультиселект БД — какие базы запрашивать
-- «Run query» — запуск
-- Фильтр результатов по дате и по БД
+- «Запустить запрос» — запуск
+
+**Результаты:**
+- Сводка: количество рулонов, общее число дефектов
+- График дефектов по классам (bar chart)
+- Статистика confidence (describe) по классам
+- Исходные данные (таблица)
+- Фильтр по дате+времени и по БД
+
+**Сравнение периодов:**
+- Два набора дата+время (Период A / Период B)
+- «Сравнить» — side-by-side таблицы + дельта (diff, diff_%)
 
 ## Нагрузка на БД
 
@@ -151,12 +163,13 @@ streamlit run app.py
 
 ```
 drift/
-├── config.py       # YAML → dataclasses (live, databases[], timestamp_column)
-├── db.py           # fetch_new_coils, fetch_coils_in_range, fetch_coil_data
-├── stats.py        # Вычисление статистик + fetched_at
-├── storage.py      # Parquet per-db layout, watermark recovery
-├── watcher.py      # Live polling + manual mode, multi-db, thread lock
-app.py              # Streamlit UI (два режима, date range, db selector)
++-- config.py       # YAML -> dataclasses (live, databases[], timestamp_column)
++-- db.py           # fetch_new_coils, fetch_coils_in_range, fetch_coil_data
++-- stats.py        # Вычисление статистик + fetched_at
++-- storage.py      # Parquet per-db layout, watermark recovery
++-- comparison.py   # Сравнение двух периодов (side-by-side + delta)
++-- watcher.py      # Live polling + manual mode, multi-db, thread lock
+app.py              # Streamlit UI (два режима, datetime, сравнение)
 config.yaml
 requirements.txt
 ```
@@ -165,6 +178,6 @@ requirements.txt
 
 **Добавить новую БД:** добавить блок в `databases:` в config.yaml — watcher подхватит автоматически.
 
-**Добавить новую метрику:** функция в `stats.py` → вызов из `compute_coil_stats()` → запись в `storage.py`.
+**Добавить новую метрику:** функция в `stats.py` -> вызов из `compute_coil_stats()` -> запись в `storage.py`.
 
-**Графики:** `pd.read_parquet("storage/main/coil_stats/")` → Plotly / `st.line_chart`. Поля `fetched_at` и `db_label` готовы для фильтрации.
+**Графики:** `pd.read_parquet("storage/main/coil_stats/")` -> Plotly / `st.line_chart`. Поля `fetched_at` и `db_label` готовы для фильтрации.

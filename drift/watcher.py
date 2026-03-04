@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import date
+from datetime import date, datetime
 
 from .config import AppConfig, DbConfig
 from .db import fetch_new_coils, fetch_coils_in_range, fetch_coil_data
@@ -64,15 +64,15 @@ class CoilWatcher:
 
     def run_manual(
         self,
-        date_from: date | None = None,
-        date_to: date | None = None,
+        date_from: date | datetime | None = None,
+        date_to: date | datetime | None = None,
         db_labels: list[str] | None = None,
     ) -> dict[str, list[str]]:
-        """Fetch and process coils within a date range (manual mode).
+        """Fetch and process coils within a date/datetime range (manual mode).
 
         Args:
-            date_from: start date (inclusive).  None → today - 7 days.
-            date_to:   end date (inclusive).  None → today.
+            date_from: start (inclusive).  Accepts date or datetime.  None → today - 7 days.
+            date_to:   end (inclusive for date, exact for datetime).  None → today.
             db_labels: which databases to query.  None → all.
 
         Returns:
@@ -126,10 +126,21 @@ class CoilWatcher:
         return new_coils
 
     def _query_range(
-        self, db_cfg: DbConfig, date_from: date | None, date_to: date | None,
+        self, db_cfg: DbConfig,
+        date_from: date | datetime | None,
+        date_to: date | datetime | None,
     ) -> list[str]:
         """Manual-mode query for a single database."""
+        from datetime import timedelta
+
         label = db_cfg.label
+        # When the caller passes a plain `date`, the upper bound is inclusive
+        # ("To: March 5" means include all of March 5), but the SQL uses
+        # exclusive upper bound (< %s), so add one day.
+        # When the caller passes a `datetime`, the bound is already precise —
+        # no adjustment needed.
+        if date_to is not None and isinstance(date_to, date) and not isinstance(date_to, datetime):
+            date_to = date_to + timedelta(days=1)
         try:
             coils = fetch_coils_in_range(db_cfg, date_from, date_to)
         except Exception:
