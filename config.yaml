@@ -1,0 +1,21 @@
+# ── Database ────────────────────────────────────────────────────
+db:
+  host: "localhost"
+  port: 5432
+  name: "defects"
+  user: "reader"
+  password: "reader"
+  # schema.table that contains defect rows
+  table: "public.defect_results"
+
+# ── Watcher ─────────────────────────────────────────────────────
+watcher:
+  # How often to check for a new coil (seconds)
+  poll_interval_sec: 600        # 10 minutes
+  # Column that identifies a coil
+  coil_id_column: "coilid"
+
+# ── Storage ─────────────────────────────────────────────────────
+storage:
+  # Directory where parquet stats files are written
+  dir: "storage"
