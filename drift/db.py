@@ -10,6 +10,8 @@ Design goals
 
 from __future__ import annotations
 
+from datetime import date, timedelta
+
 import pandas as pd
 import psycopg2
 import psycopg2.extras
@@ -34,11 +36,14 @@ def _connect(cfg: DbConfig):
     return psycopg2.connect(
         host=cfg.host,
         port=cfg.port,
-        dbname=cfg.name,
+        dbname=cfg.dbname,
         user=cfg.user,
         password=cfg.password,
         options="-c statement_timeout=30000",  # 30 s hard limit
     )
+
+
+# ── Live mode queries ───────────────────────────────────────────
 
 
 def fetch_new_coils(cfg: DbConfig, after: str | None = None) -> list[str]:
@@ -62,6 +67,52 @@ def fetch_new_coils(cfg: DbConfig, after: str | None = None) -> list[str]:
             return [row[0] for row in cur.fetchall()]
     finally:
         conn.close()
+
+
+# ── Manual mode queries ─────────────────────────────────────────
+
+
+def fetch_coils_in_range(
+    cfg: DbConfig,
+    date_from: date | None = None,
+    date_to: date | None = None,
+) -> list[str]:
+    """Return distinct coil IDs within a date range.
+
+    Requires ``cfg.timestamp_column`` to be set.  If the column is not
+    configured, falls back to returning all distinct coil IDs (no date filter).
+
+    When *date_from* / *date_to* are ``None`` they default to
+    ``today - 7 days`` / ``today + 1 day``.
+    """
+    today = date.today()
+    if date_from is None:
+        date_from = today - timedelta(days=7)
+    if date_to is None:
+        date_to = today + timedelta(days=1)  # inclusive upper bound
+
+    if cfg.timestamp_column:
+        ts = cfg.timestamp_column
+        sql = (
+            f"SELECT DISTINCT coilid FROM {cfg.table} "
+            f"WHERE {ts} >= %s AND {ts} < %s "
+            f"ORDER BY coilid"
+        )
+        params: tuple = (date_from, date_to)
+    else:
+        sql = f"SELECT DISTINCT coilid FROM {cfg.table} ORDER BY coilid"
+        params = ()
+
+    conn = _connect(cfg)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return [row[0] for row in cur.fetchall()]
+    finally:
+        conn.close()
+
+
+# ── Data fetch (shared by both modes) ──────────────────────────
 
 
 def fetch_coil_data(cfg: DbConfig, coil_id: str) -> pd.DataFrame:

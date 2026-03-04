@@ -1,21 +1,35 @@
-# ── Database ────────────────────────────────────────────────────
-db:
-  host: "localhost"
-  port: 5432
-  name: "defects"
-  user: "reader"
-  password: "reader"
-  # schema.table that contains defect rows
-  table: "public.defect_results"
+# ── Mode ────────────────────────────────────────────────────────
+# true  = auto-polling (watcher connects to all DBs on a timer)
+# false = manual mode  (queries only on button press, with date range)
+live: true
 
-# ── Watcher ─────────────────────────────────────────────────────
+# ── Databases (one or more) ─────────────────────────────────────
+databases:
+  - label: "main"
+    host: "localhost"
+    port: 5432
+    dbname: "defects"
+    user: "reader"
+    password: "reader"
+    table: "public.defect_results"
+    # Column with row creation timestamp (used for date-range filtering
+    # in manual mode).  Leave empty if table has no such column.
+    timestamp_column: "created_at"
+
+  # Uncomment to add a second database:
+  # - label: "secondary"
+  #   host: "10.0.0.2"
+  #   port: 5432
+  #   dbname: "defects_v2"
+  #   user: "reader"
+  #   password: "reader"
+  #   table: "public.defect_results"
+  #   timestamp_column: "created_at"
+
+# ── Watcher (live mode only) ───────────────────────────────────
 watcher:
-  # How often to check for a new coil (seconds)
-  poll_interval_sec: 600        # 10 minutes
-  # Column that identifies a coil
-  coil_id_column: "coilid"
+  poll_interval_sec: 600
 
 # ── Storage ─────────────────────────────────────────────────────
 storage:
-  # Directory where parquet stats files are written
   dir: "storage"

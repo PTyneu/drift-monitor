@@ -1,27 +1,17 @@
 """Parquet-based storage for coil statistics.
 
-Why Parquet?
-  - Columnar, compressed — 5–10× smaller than CSV for numeric data.
-  - Native pandas read/write — no extra dependencies.
-  - Appendable via simple file-per-coil pattern (no server process needed).
-  - Easily queryable later via DuckDB / Polars for dashboards.
-
-Layout::
+Layout (per database)::
 
     storage/
-      coil_stats/
-        <coil_id>.parquet          # per-class summary row per coil
-      confidence/
-        <coil_id>.parquet          # per-class describe() output
-      class_changes/
-        <coil_id>.parquet          # transition matrix
-      bbox/
-        <coil_id>.parquet          # bbox describe() per class
-      spatial/
-        <coil_id>.parquet          # centre-point describe()
-      conf_buckets/
-        <coil_id>.parquet          # confidence histogram
-      processed_coils.txt          # one coil_id per line
+      <db_label>/
+        coil_stats/<coil_id>.parquet
+        confidence/<coil_id>.parquet
+        class_changes/<coil_id>.parquet
+        class_change_top/<coil_id>.parquet
+        bbox/<coil_id>.parquet
+        spatial/<coil_id>.parquet
+        conf_buckets/<coil_id>.parquet
+        processed_coils.txt
 """
 
 from __future__ import annotations
@@ -42,6 +32,11 @@ _SUBDIRS = (
 )
 
 
+def _db_dir(base_dir: str | Path, db_label: str) -> Path:
+    """Return the storage root for a given database label."""
+    return Path(base_dir) / db_label
+
+
 def _ensure_dirs(base: Path) -> None:
     for sub in _SUBDIRS:
         (base / sub).mkdir(parents=True, exist_ok=True)
@@ -52,9 +47,9 @@ def _safe_name(coil_id: str) -> str:
     return str(coil_id).replace("/", "_").replace("\\", "_")
 
 
-def save_coil_stats(base_dir: str | Path, stats: dict) -> None:
+def save_coil_stats(base_dir: str | Path, db_label: str, stats: dict) -> None:
     """Persist all computed statistics for a single coil."""
-    base = Path(base_dir)
+    base = _db_dir(base_dir, db_label)
     _ensure_dirs(base)
     name = _safe_name(stats["coil_id"])
 
@@ -63,6 +58,7 @@ def save_coil_stats(base_dir: str | Path, stats: dict) -> None:
     # 1. Per-class defect counts + high-level summary
     summary = stats["defect_counts"].copy()
     summary["coil_id"] = stats["coil_id"]
+    summary["db_label"] = db_label
     summary["fetched_at"] = fetched_at
     summary["total_defects"] = stats["total_defects"]
     summary["changed_count"] = stats["class_change_summary"]["changed_count"]
@@ -96,7 +92,6 @@ def save_coil_stats(base_dir: str | Path, stats: dict) -> None:
     bbox: pd.DataFrame = stats["bbox_stats"]
     if not bbox.empty:
         bbox = bbox.copy()
-        # MultiIndex columns → flatten for parquet
         bbox.columns = ["_".join(str(c) for c in col) for col in bbox.columns]
         bbox["coil_id"] = stats["coil_id"]
         bbox["fetched_at"] = fetched_at
@@ -117,7 +112,6 @@ def save_coil_stats(base_dir: str | Path, stats: dict) -> None:
         cb = cb.copy()
         cb["coil_id"] = stats["coil_id"]
         cb["fetched_at"] = fetched_at
-        # pd.Interval не сериализуется в parquet → строка
         cb["conf_bucket"] = cb["conf_bucket"].astype(str)
         cb.to_parquet(base / "conf_buckets" / f"{name}.parquet", index=False)
 
@@ -127,22 +121,18 @@ def save_coil_stats(base_dir: str | Path, stats: dict) -> None:
         f.write(f"{stats['coil_id']}\n")
 
 
-def load_processed_coils(base_dir: str | Path) -> set[str]:
+def load_processed_coils(base_dir: str | Path, db_label: str) -> set[str]:
     """Return the set of coil IDs that have already been processed."""
-    path = Path(base_dir) / "processed_coils.txt"
+    path = _db_dir(base_dir, db_label) / "processed_coils.txt"
     if not path.exists():
         return set()
     with open(path, "r", encoding="utf-8") as f:
         return {line.strip() for line in f if line.strip()}
 
 
-def load_last_processed_coil(base_dir: str | Path) -> str | None:
-    """Return the most recently processed coil ID (last line of the log).
-
-    Used as a watermark for ``WHERE coilid > %s`` queries so that we never
-    send the full processed set to PostgreSQL.
-    """
-    path = Path(base_dir) / "processed_coils.txt"
+def load_last_processed_coil(base_dir: str | Path, db_label: str) -> str | None:
+    """Return the most recently processed coil ID (last line of the log)."""
+    path = _db_dir(base_dir, db_label) / "processed_coils.txt"
     if not path.exists():
         return None
     last = None
@@ -154,15 +144,31 @@ def load_last_processed_coil(base_dir: str | Path) -> str | None:
     return last
 
 
-def load_all_summaries(base_dir: str | Path) -> pd.DataFrame:
-    """Load and concatenate all coil_stats summaries into one DataFrame.
+def load_all_summaries(base_dir: str | Path, db_labels: list[str] | None = None) -> pd.DataFrame:
+    """Load and concatenate all coil_stats summaries.
 
-    Useful for building time-series / trend charts later.
+    If *db_labels* is provided, only those databases are included.
+    Otherwise all subdirectories with a ``coil_stats/`` folder are scanned.
     """
-    base = Path(base_dir) / "coil_stats"
+    base = Path(base_dir)
     if not base.exists():
         return pd.DataFrame()
-    files = sorted(base.glob("*.parquet"))
-    if not files:
+
+    if db_labels is None:
+        # Auto-discover: any subdir that contains coil_stats/
+        db_labels = [
+            d.name for d in sorted(base.iterdir())
+            if d.is_dir() and (d / "coil_stats").is_dir()
+        ]
+
+    frames = []
+    for label in db_labels:
+        stats_dir = base / label / "coil_stats"
+        if not stats_dir.exists():
+            continue
+        for f in sorted(stats_dir.glob("*.parquet")):
+            frames.append(pd.read_parquet(f))
+
+    if not frames:
         return pd.DataFrame()
-    return pd.concat([pd.read_parquet(f) for f in files], ignore_index=True)
+    return pd.concat(frames, ignore_index=True)
