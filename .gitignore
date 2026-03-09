@@ -11,4 +11,3 @@ test_storage/
 .venv/
 venv/
 config.yaml
-image.png
