@@ -10,6 +10,7 @@ Design goals
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -43,10 +44,20 @@ def _connect(cfg: DbConfig):
     )
 
 
+@contextmanager
+def open_connection(cfg: DbConfig):
+    """Reusable connection context manager — one TCP connection per batch."""
+    conn = _connect(cfg)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
 # ── Live mode queries ───────────────────────────────────────────
 
 
-def fetch_new_coils(cfg: DbConfig, after: str | None = None) -> list[str]:
+def fetch_new_coils(cfg: DbConfig, after: str | None = None, *, conn=None) -> list[str]:
     """Return coil IDs that appeared after the given watermark.
 
     Uses ``WHERE coilid > %s`` — a single index seek, regardless of how many
@@ -60,13 +71,16 @@ def fetch_new_coils(cfg: DbConfig, after: str | None = None) -> list[str]:
         sql = f"SELECT DISTINCT coilid FROM {cfg.table} ORDER BY coilid"
         params = ()
 
-    conn = _connect(cfg)
+    own = conn is None
+    if own:
+        conn = _connect(cfg)
     try:
         with conn.cursor() as cur:
             cur.execute(sql, params)
             return [row[0] for row in cur.fetchall()]
     finally:
-        conn.close()
+        if own:
+            conn.close()
 
 
 # ── Manual mode queries ─────────────────────────────────────────
@@ -76,11 +90,17 @@ def fetch_coils_in_range(
     cfg: DbConfig,
     date_from: date | datetime | None = None,
     date_to: date | datetime | None = None,
+    *,
+    conn=None,
 ) -> list[str]:
     """Return distinct coil IDs within a date/datetime range.
 
     Accepts both ``date`` and ``datetime`` objects.  psycopg2 handles both
     transparently (``date`` → SQL DATE, ``datetime`` → SQL TIMESTAMP).
+
+    When *date_to* is a plain ``date`` (not datetime), one day is added
+    automatically so that the upper bound is inclusive ("To: March 5" means
+    include all of March 5, since SQL uses ``< %s``).
 
     Requires ``cfg.timestamp_column`` to be set.  If the column is not
     configured, falls back to returning all distinct coil IDs (no date filter).
@@ -92,7 +112,9 @@ def fetch_coils_in_range(
     if date_from is None:
         date_from = today - timedelta(days=7)
     if date_to is None:
-        date_to = today + timedelta(days=1)  # inclusive upper bound
+        date_to = today + timedelta(days=1)
+    elif isinstance(date_to, date) and not isinstance(date_to, datetime):
+        date_to = date_to + timedelta(days=1)
 
     if cfg.timestamp_column:
         ts = cfg.timestamp_column
@@ -106,19 +128,22 @@ def fetch_coils_in_range(
         sql = f"SELECT DISTINCT coilid FROM {cfg.table} ORDER BY coilid"
         params = ()
 
-    conn = _connect(cfg)
+    own = conn is None
+    if own:
+        conn = _connect(cfg)
     try:
         with conn.cursor() as cur:
             cur.execute(sql, params)
             return [row[0] for row in cur.fetchall()]
     finally:
-        conn.close()
+        if own:
+            conn.close()
 
 
 # ── Data fetch (shared by both modes) ──────────────────────────
 
 
-def fetch_coil_data(cfg: DbConfig, coil_id: str) -> pd.DataFrame:
+def fetch_coil_data(cfg: DbConfig, coil_id: str, *, conn=None) -> pd.DataFrame:
     """Fetch all defect rows for a single coil.
 
     Only the columns needed for statistics are selected, and the query is
@@ -126,13 +151,16 @@ def fetch_coil_data(cfg: DbConfig, coil_id: str) -> pd.DataFrame:
     """
     cols = ", ".join(_COLUMNS)
     sql = f"SELECT {cols} FROM {cfg.table} WHERE coilid = %s"
-    conn = _connect(cfg)
+    own = conn is None
+    if own:
+        conn = _connect(cfg)
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, (coil_id,))
             rows = cur.fetchall()
     finally:
-        conn.close()
+        if own:
+            conn.close()
     if not rows:
         return pd.DataFrame(columns=list(_COLUMNS))
     return pd.DataFrame(rows)

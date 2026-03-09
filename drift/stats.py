@@ -166,3 +166,53 @@ def compute_coil_stats(coil_id: str, df: pd.DataFrame) -> dict:
         "spatial_stats": spatial_stats(df),
         "confidence_buckets": confidence_buckets(df),
     }
+
+
+def stats_to_frames(stats: dict, db_label: str) -> dict[str, pd.DataFrame]:
+    """Convert compute_coil_stats() output into labeled DataFrames.
+
+    Shared by storage (save to parquet) and live (return directly).
+    Returns dict with keys: summary, confidence, conf_buckets, class_change_top.
+    """
+    cid = stats["coil_id"]
+    ts = stats["fetched_at"]
+
+    summary = stats["defect_counts"].copy()
+    summary["coil_id"] = cid
+    summary["db_label"] = db_label
+    summary["fetched_at"] = ts
+    summary["total_defects"] = stats["total_defects"]
+    summary["changed_count"] = stats["class_change_summary"]["changed_count"]
+    summary["changed_pct"] = stats["class_change_summary"]["changed_pct"]
+
+    conf = stats["confidence_stats"]
+    if not conf.empty:
+        conf = conf.copy()
+        conf["coil_id"] = cid
+        conf["fetched_at"] = ts
+    else:
+        conf = pd.DataFrame()
+
+    cb = stats["confidence_buckets"]
+    if not cb.empty:
+        cb = cb.copy()
+        cb["coil_id"] = cid
+        cb["fetched_at"] = ts
+        cb["conf_bucket"] = cb["conf_bucket"].astype(str)
+    else:
+        cb = pd.DataFrame()
+
+    top = stats["class_change_top"]
+    if not top.empty:
+        top = top.copy()
+        top["coil_id"] = cid
+        top["fetched_at"] = ts
+    else:
+        top = pd.DataFrame()
+
+    return {
+        "summary": summary,
+        "confidence": conf,
+        "conf_buckets": cb,
+        "class_change_top": top,
+    }

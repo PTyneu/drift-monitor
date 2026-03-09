@@ -5,7 +5,10 @@ dist/
 build/
 .eggs/
 storage/
+test_storage/
 *.parquet
 .env
 .venv/
 venv/
+config.yaml
+image.png

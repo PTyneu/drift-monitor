@@ -20,6 +20,8 @@ from pathlib import Path
 
 import pandas as pd
 
+from .stats import stats_to_frames
+
 
 _SUBDIRS = (
     "coil_stats",
@@ -52,43 +54,30 @@ def save_coil_stats(base_dir: str | Path, db_label: str, stats: dict) -> None:
     base = _db_dir(base_dir, db_label)
     _ensure_dirs(base)
     name = _safe_name(stats["coil_id"])
-
     fetched_at = stats["fetched_at"]
 
-    # 1. Per-class defect counts + high-level summary
-    summary = stats["defect_counts"].copy()
-    summary["coil_id"] = stats["coil_id"]
-    summary["db_label"] = db_label
-    summary["fetched_at"] = fetched_at
-    summary["total_defects"] = stats["total_defects"]
-    summary["changed_count"] = stats["class_change_summary"]["changed_count"]
-    summary["changed_pct"] = stats["class_change_summary"]["changed_pct"]
-    summary.to_parquet(base / "coil_stats" / f"{name}.parquet", index=False)
+    # Shared frames (summary, confidence, conf_buckets, class_change_top)
+    frames = stats_to_frames(stats, db_label)
 
-    # 2. Confidence describe()
-    conf: pd.DataFrame = stats["confidence_stats"]
-    if not conf.empty:
-        conf = conf.copy()
-        conf["coil_id"] = stats["coil_id"]
-        conf["fetched_at"] = fetched_at
-        conf.to_parquet(base / "confidence" / f"{name}.parquet")
+    frames["summary"].to_parquet(base / "coil_stats" / f"{name}.parquet", index=False)
 
-    # 3. Class-change transition matrix
+    if not frames["confidence"].empty:
+        frames["confidence"].to_parquet(base / "confidence" / f"{name}.parquet")
+
+    if not frames["class_change_top"].empty:
+        frames["class_change_top"].to_parquet(base / "class_change_top" / f"{name}.parquet", index=False)
+
+    if not frames["conf_buckets"].empty:
+        frames["conf_buckets"].to_parquet(base / "conf_buckets" / f"{name}.parquet", index=False)
+
+    # Class-change transition matrix (parquet-only, not needed in live mode)
     matrix: pd.DataFrame = stats["class_change_matrix"]
     if not matrix.empty:
         matrix = matrix.copy()
         matrix["fetched_at"] = fetched_at
         matrix.to_parquet(base / "class_changes" / f"{name}.parquet")
 
-    # 4. Top class transitions
-    top: pd.DataFrame = stats["class_change_top"]
-    if not top.empty:
-        top = top.copy()
-        top["coil_id"] = stats["coil_id"]
-        top["fetched_at"] = fetched_at
-        top.to_parquet(base / "class_change_top" / f"{name}.parquet", index=False)
-
-    # 5. Bbox describe()
+    # Bbox describe() (parquet-only)
     bbox: pd.DataFrame = stats["bbox_stats"]
     if not bbox.empty:
         bbox = bbox.copy()
@@ -97,7 +86,7 @@ def save_coil_stats(base_dir: str | Path, db_label: str, stats: dict) -> None:
         bbox["fetched_at"] = fetched_at
         bbox.to_parquet(base / "bbox" / f"{name}.parquet")
 
-    # 6. Spatial describe()
+    # Spatial describe() (parquet-only)
     sp: pd.DataFrame = stats["spatial_stats"]
     if not sp.empty:
         sp = sp.copy()
@@ -106,16 +95,7 @@ def save_coil_stats(base_dir: str | Path, db_label: str, stats: dict) -> None:
         sp["fetched_at"] = fetched_at
         sp.to_parquet(base / "spatial" / f"{name}.parquet")
 
-    # 7. Confidence buckets
-    cb: pd.DataFrame = stats["confidence_buckets"]
-    if not cb.empty:
-        cb = cb.copy()
-        cb["coil_id"] = stats["coil_id"]
-        cb["fetched_at"] = fetched_at
-        cb["conf_bucket"] = cb["conf_bucket"].astype(str)
-        cb.to_parquet(base / "conf_buckets" / f"{name}.parquet", index=False)
-
-    # 8. Append to processed list
+    # Append to processed list
     processed = base / "processed_coils.txt"
     with open(processed, "a", encoding="utf-8") as f:
         f.write(f"{stats['coil_id']}\n")
@@ -136,35 +116,42 @@ def load_last_processed_coil(base_dir: str | Path, db_label: str) -> str | None:
     return last
 
 
-def load_all_confidence(base_dir: str | Path, db_labels: list[str] | None = None) -> pd.DataFrame:
-    """Load and concatenate all per-coil confidence describe() parquets.
-
-    Returns a DataFrame with columns from describe() + coil_id + fetched_at.
-    The index is ``defectclass``.
-    """
+def _load_subdir(base_dir: str | Path, subdir: str, db_labels: list[str] | None = None,
+                  ignore_index: bool = True) -> pd.DataFrame:
+    """Generic loader: concatenate all parquets from storage/<label>/<subdir>/."""
     base = Path(base_dir)
     if not base.exists():
         return pd.DataFrame()
-
     if db_labels is None:
         db_labels = [
             d.name for d in sorted(base.iterdir())
-            if d.is_dir() and (d / "confidence").is_dir()
+            if d.is_dir() and (d / subdir).is_dir()
         ]
-
     frames = []
     for label in db_labels:
-        conf_dir = base / label / "confidence"
-        if not conf_dir.exists():
+        sub = base / label / subdir
+        if not sub.exists():
             continue
-        for f in sorted(conf_dir.glob("*.parquet")):
+        for f in sorted(sub.glob("*.parquet")):
             df = pd.read_parquet(f)
             df["db_label"] = label
             frames.append(df)
-
     if not frames:
         return pd.DataFrame()
-    return pd.concat(frames, ignore_index=False)
+    return pd.concat(frames, ignore_index=ignore_index)
+
+
+def load_all_conf_buckets(base_dir: str | Path, db_labels: list[str] | None = None) -> pd.DataFrame:
+    return _load_subdir(base_dir, "conf_buckets", db_labels)
+
+
+def load_all_class_change_top(base_dir: str | Path, db_labels: list[str] | None = None) -> pd.DataFrame:
+    return _load_subdir(base_dir, "class_change_top", db_labels)
+
+
+def load_all_confidence(base_dir: str | Path, db_labels: list[str] | None = None) -> pd.DataFrame:
+    """Load and concatenate all per-coil confidence describe() parquets."""
+    return _load_subdir(base_dir, "confidence", db_labels, ignore_index=False)
 
 
 def load_all_summaries(base_dir: str | Path, db_labels: list[str] | None = None) -> pd.DataFrame:

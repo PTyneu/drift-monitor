@@ -15,7 +15,7 @@ import threading
 from datetime import date, datetime
 
 from .config import AppConfig, DbConfig
-from .db import fetch_new_coils, fetch_coils_in_range, fetch_coil_data
+from .db import open_connection, fetch_new_coils, fetch_coils_in_range, fetch_coil_data
 from .stats import compute_coil_stats
 from .storage import save_coil_stats, load_last_processed_coil
 
@@ -99,7 +99,7 @@ class CoilWatcher:
             self._stop_event.wait(timeout=self.cfg.watcher.poll_interval_sec)
 
     def _poll_db(self, db_cfg: DbConfig) -> list[str]:
-        """Live-mode poll for a single database."""
+        """Live-mode poll for a single database. One connection per batch."""
         label = db_cfg.label
 
         # Lazy watermark init
@@ -111,18 +111,19 @@ class CoilWatcher:
             log.info("[%s] Watermark initialised: %s", label, self._watermarks[label])
 
         try:
-            new_coils = fetch_new_coils(db_cfg, after=self._watermarks[label])
+            with open_connection(db_cfg) as conn:
+                new_coils = fetch_new_coils(db_cfg, after=self._watermarks[label], conn=conn)
+                if not new_coils:
+                    log.debug("[%s] No new coils since %s", label, self._watermarks[label])
+                    return []
+
+                log.info("[%s] New coils: %s", label, new_coils)
+                for coil_id in new_coils:
+                    self._process_coil(db_cfg, coil_id, conn=conn)
         except Exception:
-            log.exception("[%s] Failed to fetch new coils", label)
+            log.exception("[%s] Failed to poll DB", label)
             return []
 
-        if not new_coils:
-            log.debug("[%s] No new coils since %s", label, self._watermarks[label])
-            return []
-
-        log.info("[%s] New coils: %s", label, new_coils)
-        for coil_id in new_coils:
-            self._process_coil(db_cfg, coil_id)
         return new_coils
 
     def _query_range(
@@ -130,37 +131,30 @@ class CoilWatcher:
         date_from: date | datetime | None,
         date_to: date | datetime | None,
     ) -> list[str]:
-        """Manual-mode query for a single database."""
-        from datetime import timedelta
-
+        """Manual-mode query for a single database. One connection per batch."""
         label = db_cfg.label
-        # When the caller passes a plain `date`, the upper bound is inclusive
-        # ("To: March 5" means include all of March 5), but the SQL uses
-        # exclusive upper bound (< %s), so add one day.
-        # When the caller passes a `datetime`, the bound is already precise —
-        # no adjustment needed.
-        if date_to is not None and isinstance(date_to, date) and not isinstance(date_to, datetime):
-            date_to = date_to + timedelta(days=1)
         try:
-            coils = fetch_coils_in_range(db_cfg, date_from, date_to)
+            with open_connection(db_cfg) as conn:
+                # date_to adjustment (date → date+1) is handled inside fetch_coils_in_range
+                coils = fetch_coils_in_range(db_cfg, date_from, date_to, conn=conn)
+                if not coils:
+                    log.info("[%s] No coils found in range %s – %s", label, date_from, date_to)
+                    return []
+
+                log.info("[%s] Found %d coils in range, processing…", label, len(coils))
+                for coil_id in coils:
+                    self._process_coil(db_cfg, coil_id, conn=conn)
         except Exception:
-            log.exception("[%s] Failed to fetch coils in range", label)
+            log.exception("[%s] Failed to query range %s – %s", label, date_from, date_to)
             return []
 
-        if not coils:
-            log.info("[%s] No coils found in range %s – %s", label, date_from, date_to)
-            return []
-
-        log.info("[%s] Found %d coils in range, processing…", label, len(coils))
-        for coil_id in coils:
-            self._process_coil(db_cfg, coil_id)
         return coils
 
-    def _process_coil(self, db_cfg: DbConfig, coil_id: str) -> None:
+    def _process_coil(self, db_cfg: DbConfig, coil_id: str, *, conn=None) -> None:
         label = db_cfg.label
         log.info("[%s] Processing coil %s…", label, coil_id)
         try:
-            df = fetch_coil_data(db_cfg, coil_id)
+            df = fetch_coil_data(db_cfg, coil_id, conn=conn)
         except Exception:
             log.exception("[%s] Failed to fetch data for coil %s", label, coil_id)
             return
