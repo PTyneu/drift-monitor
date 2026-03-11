@@ -122,8 +122,13 @@ storage/
 
 ```bash
 pip install -r requirements.txt
+python seed_storage.py   # генерация демо-данных (6 рулонов)
 streamlit run app.py
 ```
+
+> **Без БД:** `seed_storage.py` создаёт тестовые parquet-файлы в `storage/demo/`,
+> приложение сразу показывает графики на обеих вкладках.
+> При подключении к реальной БД — измените `config.yaml` и переключите режим на `live: true`.
 
 ## Streamlit UI
 

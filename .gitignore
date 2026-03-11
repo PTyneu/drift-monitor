@@ -10,4 +10,4 @@ test_storage/
 .env
 .venv/
 venv/
-config.yaml
+# config.yaml  # раскомментировать если в конфиге реальные credentials
