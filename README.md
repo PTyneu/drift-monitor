@@ -1,196 +1,88 @@
-# Drift Monitor
+# Drift Compare
 
-Сервис мониторинга табличного дрифта данных.
+Сервис сравнения данных дефектоскопии между средами (test / prod) и обучающей выборкой.
 
-![структурная схема](image.png)
+## Режимы сравнения
 
-## Два режима работы
+| Режим | Описание |
+|---|---|
+| **Тестовая БД** | Статистика по дефектам из тестовой среды за выбранный период |
+| **Продуктовая БД** | Статистика по дефектам из продуктовой среды за выбранный период |
+| **Сравнение БД с CSV** | Попарное сравнение классов дефектов из БД с обучающей CSV-выборкой |
+| **Сравнение двух БД** | Сравнение test vs prod по общим рулонам (coilid) |
 
-### Live (`live: true`)
+## Визуализации
 
-```
-CoilWatcher (фоновый поток)
-  |
-  +-- DB "main"      --> WHERE coilid > watermark --> Stats --> Parquet
-  +-- DB "secondary"  --> WHERE coilid > watermark --> Stats --> Parquet
-  |
-  +-- sleep(poll_interval_sec) --> повтор
-```
-
-- Фоновый поток опрашивает **все** настроенные БД каждые N секунд.
-- Watermark (последний обработанный coilid) хранится в памяти — один параметр в SQL.
-- Кнопка «Проверить сейчас» запускает внеочередную проверку.
-
-### Manual (`live: false`)
-
-```
-Пользователь в Streamlit UI
-  |
-  +-- Выбирает дату + время (по умолчанию: последняя неделя)
-  +-- Выбирает БД (чекбоксы)
-  +-- Жмёт "Запустить запрос"
-  |
-  +---> SQL: WHERE created_at >= %s AND created_at < %s
-         +---> Stats --> Parquet
-```
-
-- Никакого фонового потока — запросы только по кнопке.
-- Фильтрация по `timestamp_column` из конфига (например `created_at`).
-- Поддержка дата+время (datetime) для точных диапазонов.
-- Если даты не указаны — берётся последняя неделя.
-- Если `timestamp_column` не задан — загружаются все рулоны (без фильтра по дате).
+- Попарное сравнение количества дефектов по классам (grouped bar + дельта-таблица)
+- Гистограмма распределения confidence (0-1), overlay при сравнении двух источников
+- Процент переклассификации (raw -> final) по рулонам
+- Топ-15 переклассификаций (raw -> final)
+- Фильтр классов дефектов (все выбраны по умолчанию, можно убирать)
 
 ## Конфигурация
 
 ```yaml
-# Режим: true = auto-polling, false = manual
-live: true
-
-# Одна или несколько БД
 databases:
-  - label: "main"
+  - label: "test"
     host: "localhost"
     port: 5432
-    dbname: "defects"
-    user: "reader"
-    password: "reader"
-    table: "public.defect_results"
-    timestamp_column: "created_at"    # для manual mode
-
-  - label: "secondary"
-    host: "10.0.0.2"
-    port: 5432
-    dbname: "defects_v2"
+    dbname: "defects_test"
     user: "reader"
     password: "reader"
     table: "public.defect_results"
     timestamp_column: "created_at"
 
-watcher:
-  poll_interval_sec: 600
+  - label: "prod"
+    host: "localhost"
+    port: 5432
+    dbname: "defects_prod"
+    user: "reader"
+    password: "reader"
+    table: "public.defect_results"
+    timestamp_column: "created_at"
 
 storage:
   dir: "storage"
 ```
 
-| Поле | Описание |
-|---|---|
-| `live` | `true` — авто-поллинг, `false` — только по кнопке |
-| `databases[].label` | Уникальное имя БД (используется как имя поддиректории в storage) |
-| `databases[].table` | Полное `schema.table` имя таблицы |
-| `databases[].timestamp_column` | Столбец с датой создания строки (для фильтрации в manual mode). Пустая строка = не фильтровать |
-| `watcher.poll_interval_sec` | Интервал между проверками в live mode |
+## CSV обучающей выборки
 
-## Метрики
-
-| Метрика | Описание |
-|---|---|
-| `defect_counts` | Количество дефектов каждого класса |
-| `confidence_stats` | `describe()` по confidence для каждого класса |
-| `class_change_summary` | Сколько дефектов изменили класс (`rawdefectclass != defectclass`) |
-| `class_change_matrix` | Матрица переходов raw -> final |
-| `class_change_top` | Самые частые переходы между классами |
-| `bbox_stats` | `describe()` по ширине, высоте, площади и aspect ratio bbox |
-| `spatial_stats` | Статистика центров bbox (mean/std cx, cy) |
-| `confidence_buckets` | Гистограмма confidence по бакетам |
-
-Каждая метрика содержит `fetched_at` (UTC) и `db_label` для фильтрации.
-
-## Хранилище
-
-```
-storage/
-+-- main/                     # label первой БД
-|   +-- coil_stats/
-|   |   +-- COIL_001.parquet
-|   |   +-- COIL_002.parquet
-|   +-- confidence/
-|   +-- class_changes/
-|   +-- class_change_top/
-|   +-- bbox/
-|   +-- spatial/
-|   +-- conf_buckets/
-|   +-- processed_coils.txt
-+-- secondary/                # label второй БД
-|   +-- coil_stats/
-|   +-- ...
-```
-
-Каждая БД хранит данные в своей поддиректории — coilid из разных БД не пересекаются.
+CSV должен содержать:
+- `instance_label` — класс дефекта (маппится в `defectclass`)
+- `bbox_xtl`, `bbox_ytl`, `bbox_xbr`, `bbox_ybr` — координаты боксов
+- Confidence в CSV **нет** — по нему не сравниваем
 
 ## Быстрый старт
 
 ```bash
 pip install -r requirements.txt
-python seed_storage.py   # генерация демо-данных (6 рулонов)
-streamlit run app.py
+python seed_compare.py    # генерация демо-данных (test + prod + CSV)
+streamlit run compare_app.py
 ```
-
-> **Без БД:** `seed_storage.py` создаёт тестовые parquet-файлы в `storage/demo/`,
-> приложение сразу показывает графики на обеих вкладках.
-> При подключении к реальной БД — измените `config.yaml` и переключите режим на `live: true`.
-
-## Streamlit UI
-
-Интерфейс на русском языке.
-
-**Live-режим:**
-- «Проверить сейчас» — внеочередная проверка всех БД
-- «Запустить/Остановить фоновый мониторинг» — управление фоновым потоком
-
-**Ручной режим:**
-- Дата+время (от/до) — по умолчанию последняя неделя
-- Мультиселект БД — какие базы запрашивать
-- «Запустить запрос» — запуск
-
-**Результаты:**
-- Сводка: количество рулонов, общее число дефектов
-- График дефектов по классам (bar chart)
-- Статистика confidence (describe) по классам
-- Исходные данные (таблица)
-- Фильтр по дате+времени и по БД
-
-**Сравнение периодов:**
-- Два набора дата+время (Период A / Период B)
-- «Сравнить» — side-by-side таблицы + дельта (diff, diff_%)
-
-## Нагрузка на БД
-
-| Режим | Запрос | Стоимость |
-|---|---|---|
-| Live | `SELECT DISTINCT coilid WHERE coilid > %s` | Index seek, 1 параметр |
-| Manual | `SELECT DISTINCT coilid WHERE ts >= %s AND ts < %s` | Range scan по timestamp |
-| Оба | `SELECT <8 cols> WHERE coilid = %s` | Index seek на каждый рулон |
-
-- Короткоживущие соединения, `statement_timeout=30s`.
-- `threading.Lock` исключает дублирование работы.
 
 ## Структура кода
 
 ```
 drift/
-+-- config.py       # YAML -> dataclasses (live, databases[], timestamp_column)
-+-- db.py           # fetch_new_coils, fetch_coils_in_range, fetch_coil_data
-+-- stats.py        # Вычисление статистик + fetched_at
-+-- storage.py      # Parquet per-db layout, watermark recovery
-+-- comparison.py   # Сравнение двух периодов (side-by-side + delta)
-+-- watcher.py      # Live polling + manual mode, multi-db, thread lock
-app.py              # Streamlit UI (два режима, datetime, сравнение)
-config.yaml
-requirements.txt
+  config.py       # YAML -> dataclasses
+  db.py           # PostgreSQL запросы (8 столбцов)
+  stats.py        # Вычисление статистик
+  storage.py      # Parquet I/O (per-db layout)
+compare_app.py    # Streamlit UI (4 режима сравнения)
+seed_compare.py   # Генерация синтетических данных
+config.yaml       # Креды test/prod БД
 ```
 
-## Последние обновления
+## Хранилище
 
-- **Вкладка «Анализ дрифта»** — 6 визуализаций: дефекты по классам на рулон, тренд среднего confidence, гистограмма confidence (с отдельным селектором класса), % смены классов, топ переходов между классами, тренд общего числа дефектов с дельтой между половинами периода.
-- **Live-режим БД** — переключатель «Parquet / БД (live-запрос)» позволяет строить графики дрифта напрямую из PostgreSQL без промежуточных parquet-файлов (модуль `drift/live.py`).
-- **Селектор класса для гистограммы confidence** — независимый от общего фильтра классов, позволяет анализировать распределение confidence по отдельному классу.
-- **Исправлены deprecation-warnings Streamlit** — `use_container_width` заменён на `width="stretch"`.
-
-## Расширение
-
-**Добавить новую БД:** добавить блок в `databases:` в config.yaml — watcher подхватит автоматически.
-
-**Добавить новую метрику:** функция в `stats.py` -> вызов из `compute_coil_stats()` -> запись в `storage.py`.
-
-**Графики:** `pd.read_parquet("storage/main/coil_stats/")` -> Plotly / `st.line_chart`. Поля `fetched_at` и `db_label` готовы для фильтрации.
+```
+storage/
+  test/
+    coil_stats/     # Сводка по рулонам
+    confidence/     # describe() по confidence
+    conf_buckets/   # Гистограмма confidence
+    class_change_top/  # Топ переклассификаций
+    ...
+  prod/
+    ...
+```

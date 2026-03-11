@@ -1,34 +1,22 @@
-# ── Mode ────────────────────────────────────────────────────────
-# true  = auto-polling (watcher connects to all DBs on a timer)
-# false = manual mode  (queries only on button press, with date range)
-live: false
-
-# ── Databases (one or more) ─────────────────────────────────────
+# ── Databases ──────────────────────────────────────────────────
 databases:
-  - label: "demo"
+  - label: "test"
     host: "localhost"
     port: 5432
-    dbname: "defects"
+    dbname: "defects_test"
     user: "reader"
     password: "reader"
     table: "public.defect_results"
-    # Column with row creation timestamp (used for date-range filtering
-    # in manual mode).  Leave empty if table has no such column.
     timestamp_column: "created_at"
 
-  # для потенциально второй бд
-  # - label: "secondary"
-  #   host: "10.0.0.2"
-  #   port: 5432
-  #   dbname: "defects_v2"
-  #   user: "reader"
-  #   password: "reader"
-  #   table: "public.defect_results"
-  #   timestamp_column: "created_at"
-
-# ── Watcher (live mode only) ───────────────────────────────────
-watcher:
-  poll_interval_sec: 600
+  - label: "prod"
+    host: "localhost"
+    port: 5432
+    dbname: "defects_prod"
+    user: "reader"
+    password: "reader"
+    table: "public.defect_results"
+    timestamp_column: "created_at"
 
 # ── Storage ─────────────────────────────────────────────────────
 storage:

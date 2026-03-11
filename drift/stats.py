@@ -121,24 +121,6 @@ def spatial_stats(df: pd.DataFrame) -> pd.DataFrame:
     return ext.groupby("defectclass")[["cx", "cy"]].describe()
 
 
-# ── confidence distribution buckets ────────────────────────────
-
-def confidence_buckets(df: pd.DataFrame, bins: int = 5) -> pd.DataFrame:
-    """Histogram-style confidence buckets per class.
-
-    Useful for spotting if the model becomes less/more confident over time.
-    """
-    if df.empty:
-        return pd.DataFrame()
-    df = df.copy()
-    df["conf_bucket"] = pd.cut(df["confidence"], bins=bins)
-    return (
-        df.groupby(["defectclass", "conf_bucket"], observed=True)
-        .size()
-        .reset_index(name="count")
-    )
-
-
 # ── master function ────────────────────────────────────────────
 
 def compute_coil_stats(coil_id: str, df: pd.DataFrame) -> dict:
@@ -155,6 +137,7 @@ def compute_coil_stats(coil_id: str, df: pd.DataFrame) -> dict:
         "total_defects": len(df),
         "defect_counts": defect_counts(df),
         "confidence_stats": confidence_stats(df),
+        "confidence_raw": df[["defectclass", "confidence"]].copy() if not df.empty else pd.DataFrame(),
         "class_change_summary": {
             "changed_count": cls_change["changed_count"],
             "changed_pct": cls_change["changed_pct"],
@@ -164,7 +147,6 @@ def compute_coil_stats(coil_id: str, df: pd.DataFrame) -> dict:
         "class_change_top": cls_change["top_changes"],
         "bbox_stats": bbox_stats(df),
         "spatial_stats": spatial_stats(df),
-        "confidence_buckets": confidence_buckets(df),
     }
 
 
@@ -172,7 +154,7 @@ def stats_to_frames(stats: dict, db_label: str) -> dict[str, pd.DataFrame]:
     """Convert compute_coil_stats() output into labeled DataFrames.
 
     Shared by storage (save to parquet) and live (return directly).
-    Returns dict with keys: summary, confidence, conf_buckets, class_change_top.
+    Returns dict with keys: summary, confidence, class_change_top.
     """
     cid = stats["coil_id"]
     ts = stats["fetched_at"]
@@ -193,15 +175,6 @@ def stats_to_frames(stats: dict, db_label: str) -> dict[str, pd.DataFrame]:
     else:
         conf = pd.DataFrame()
 
-    cb = stats["confidence_buckets"]
-    if not cb.empty:
-        cb = cb.copy()
-        cb["coil_id"] = cid
-        cb["fetched_at"] = ts
-        cb["conf_bucket"] = cb["conf_bucket"].astype(str)
-    else:
-        cb = pd.DataFrame()
-
     top = stats["class_change_top"]
     if not top.empty:
         top = top.copy()
@@ -213,6 +186,5 @@ def stats_to_frames(stats: dict, db_label: str) -> dict[str, pd.DataFrame]:
     return {
         "summary": summary,
         "confidence": conf,
-        "conf_buckets": cb,
         "class_change_top": top,
     }

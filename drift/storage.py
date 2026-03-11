@@ -6,11 +6,11 @@ Layout (per database)::
       <db_label>/
         coil_stats/<coil_id>.parquet
         confidence/<coil_id>.parquet
+        confidence_raw/<coil_id>.parquet   # raw (defectclass, confidence) per row
         class_changes/<coil_id>.parquet
         class_change_top/<coil_id>.parquet
         bbox/<coil_id>.parquet
         spatial/<coil_id>.parquet
-        conf_buckets/<coil_id>.parquet
         processed_coils.txt
 """
 
@@ -26,11 +26,11 @@ from .stats import stats_to_frames
 _SUBDIRS = (
     "coil_stats",
     "confidence",
+    "confidence_raw",
     "class_changes",
     "class_change_top",
     "bbox",
     "spatial",
-    "conf_buckets",
 )
 
 
@@ -56,7 +56,7 @@ def save_coil_stats(base_dir: str | Path, db_label: str, stats: dict) -> None:
     name = _safe_name(stats["coil_id"])
     fetched_at = stats["fetched_at"]
 
-    # Shared frames (summary, confidence, conf_buckets, class_change_top)
+    # Shared frames (summary, confidence, class_change_top)
     frames = stats_to_frames(stats, db_label)
 
     frames["summary"].to_parquet(base / "coil_stats" / f"{name}.parquet", index=False)
@@ -67,17 +67,22 @@ def save_coil_stats(base_dir: str | Path, db_label: str, stats: dict) -> None:
     if not frames["class_change_top"].empty:
         frames["class_change_top"].to_parquet(base / "class_change_top" / f"{name}.parquet", index=False)
 
-    if not frames["conf_buckets"].empty:
-        frames["conf_buckets"].to_parquet(base / "conf_buckets" / f"{name}.parquet", index=False)
+    # Raw confidence values (defectclass + confidence float per row)
+    raw_conf: pd.DataFrame = stats.get("confidence_raw", pd.DataFrame())
+    if not raw_conf.empty:
+        rc = raw_conf[["defectclass", "confidence"]].copy()
+        rc["coil_id"] = stats["coil_id"]
+        rc["fetched_at"] = fetched_at
+        rc.to_parquet(base / "confidence_raw" / f"{name}.parquet", index=False)
 
-    # Class-change transition matrix (parquet-only, not needed in live mode)
+    # Class-change transition matrix
     matrix: pd.DataFrame = stats["class_change_matrix"]
     if not matrix.empty:
         matrix = matrix.copy()
         matrix["fetched_at"] = fetched_at
         matrix.to_parquet(base / "class_changes" / f"{name}.parquet")
 
-    # Bbox describe() (parquet-only)
+    # Bbox describe()
     bbox: pd.DataFrame = stats["bbox_stats"]
     if not bbox.empty:
         bbox = bbox.copy()
@@ -86,7 +91,7 @@ def save_coil_stats(base_dir: str | Path, db_label: str, stats: dict) -> None:
         bbox["fetched_at"] = fetched_at
         bbox.to_parquet(base / "bbox" / f"{name}.parquet")
 
-    # Spatial describe() (parquet-only)
+    # Spatial describe()
     sp: pd.DataFrame = stats["spatial_stats"]
     if not sp.empty:
         sp = sp.copy()
@@ -141,8 +146,9 @@ def _load_subdir(base_dir: str | Path, subdir: str, db_labels: list[str] | None 
     return pd.concat(frames, ignore_index=ignore_index)
 
 
-def load_all_conf_buckets(base_dir: str | Path, db_labels: list[str] | None = None) -> pd.DataFrame:
-    return _load_subdir(base_dir, "conf_buckets", db_labels)
+def load_all_confidence_raw(base_dir: str | Path, db_labels: list[str] | None = None) -> pd.DataFrame:
+    """Load raw (defectclass, confidence) values for all coils."""
+    return _load_subdir(base_dir, "confidence_raw", db_labels)
 
 
 def load_all_class_change_top(base_dir: str | Path, db_labels: list[str] | None = None) -> pd.DataFrame:
@@ -155,17 +161,12 @@ def load_all_confidence(base_dir: str | Path, db_labels: list[str] | None = None
 
 
 def load_all_summaries(base_dir: str | Path, db_labels: list[str] | None = None) -> pd.DataFrame:
-    """Load and concatenate all coil_stats summaries.
-
-    If *db_labels* is provided, only those databases are included.
-    Otherwise all subdirectories with a ``coil_stats/`` folder are scanned.
-    """
+    """Load and concatenate all coil_stats summaries."""
     base = Path(base_dir)
     if not base.exists():
         return pd.DataFrame()
 
     if db_labels is None:
-        # Auto-discover: any subdir that contains coil_stats/
         db_labels = [
             d.name for d in sorted(base.iterdir())
             if d.is_dir() and (d / "coil_stats").is_dir()

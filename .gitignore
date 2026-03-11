@@ -5,8 +5,8 @@ dist/
 build/
 .eggs/
 storage/
-test_storage/
 *.parquet
+training_data.csv
 .env
 .venv/
 venv/
