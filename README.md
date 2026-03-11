@@ -64,23 +64,41 @@ streamlit run compare_app.py
 
 ```
 drift/
-  config.py       # YAML -> dataclasses
-  db.py           # PostgreSQL запросы (8 столбцов)
-  stats.py        # Вычисление статистик
-  storage.py      # Parquet I/O (per-db layout)
-compare_app.py    # Streamlit UI (4 режима сравнения)
-seed_compare.py   # Генерация синтетических данных
-config.yaml       # Креды test/prod БД
+  config.py         # YAML -> dataclasses
+  db.py             # PostgreSQL запросы (8 столбцов)
+  stats.py          # Вычисление статистик
+  storage.py        # Parquet I/O (per-db layout)
+  compare_page.py   # Логика вкладки сравнения (embeddable)
+compare_app.py      # Standalone Streamlit launcher
+seed_compare.py     # Генерация синтетических данных
+config.yaml         # Креды test/prod БД
 ```
+
+## Встраивание как вкладка
+
+`drift/compare_page.py` можно использовать как вкладку в более крупном Streamlit-приложении:
+
+```python
+import streamlit as st
+from drift.config import load_config
+from drift.compare_page import render_compare_tab
+
+cfg = load_config("config.yaml")
+tab1, tab2 = st.tabs(["Сравнение", "Другое"])
+with tab1:
+    render_compare_tab(cfg)
+```
+
+Все виджеты внутри используют префикс `cmp_` для ключей, чтобы не конфликтовать с другими вкладками.
 
 ## Хранилище
 
 ```
 storage/
   test/
-    coil_stats/     # Сводка по рулонам
-    confidence/     # describe() по confidence
-    conf_buckets/   # Гистограмма confidence
+    coil_stats/        # Сводка по рулонам
+    confidence/        # describe() по confidence
+    confidence_raw/    # Сырые значения confidence
     class_change_top/  # Топ переклассификаций
     ...
   prod/
