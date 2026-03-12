@@ -140,6 +140,56 @@ def fetch_coils_in_range(
             conn.close()
 
 
+# ── Batch fetch (single query for all coils in range) ─────────
+
+
+def fetch_all_in_range(
+    cfg: DbConfig,
+    date_from: date | datetime | None = None,
+    date_to: date | datetime | None = None,
+    *,
+    conn=None,
+) -> pd.DataFrame:
+    """Fetch all defect rows in a date range in one query.
+
+    Much faster than per-coil queries when many coils are involved.
+    Returns a DataFrame with all rows; caller groups by coilid.
+    """
+    today = date.today()
+    if date_from is None:
+        date_from = today - timedelta(days=7)
+    if date_to is None:
+        date_to = today + timedelta(days=1)
+    elif isinstance(date_to, date) and not isinstance(date_to, datetime):
+        date_to = date_to + timedelta(days=1)
+
+    cols = ", ".join(_COLUMNS)
+    if cfg.timestamp_column:
+        ts = cfg.timestamp_column
+        sql = (
+            f"SELECT {cols} FROM {cfg.table} "
+            f"WHERE {ts} >= %s AND {ts} < %s"
+        )
+        params: tuple = (date_from, date_to)
+    else:
+        sql = f"SELECT {cols} FROM {cfg.table}"
+        params = ()
+
+    own = conn is None
+    if own:
+        conn = _connect(cfg)
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+    finally:
+        if own:
+            conn.close()
+    if not rows:
+        return pd.DataFrame(columns=list(_COLUMNS))
+    return pd.DataFrame(rows)
+
+
 # ── Data fetch (shared by both modes) ──────────────────────────
 
 

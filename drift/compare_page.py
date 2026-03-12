@@ -20,7 +20,7 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from .config import AppConfig
-from .db import fetch_coils_in_range, fetch_coil_data, open_connection
+from .db import fetch_all_in_range, open_connection
 from .stats import compute_coil_stats, stats_to_frames
 from .storage import (
     load_all_summaries,
@@ -78,30 +78,32 @@ def _load_for_label(cfg: AppConfig, label: str,
     return {"summaries": summaries, "confidence_raw": conf_raw, "class_changes": changes}
 
 
-def _fetch_db_label(db_cfg, date_from: date, date_to: date) -> dict[str, pd.DataFrame]:
-    """Fetch live data from a real PostgreSQL database."""
+def _fetch_db_label(db_cfg, dt_from: datetime, dt_to: datetime) -> dict[str, pd.DataFrame]:
+    """Fetch live data from a real PostgreSQL database (single batch query)."""
     label = db_cfg.label
+
+    with open_connection(db_cfg) as conn:
+        all_data = fetch_all_in_range(db_cfg, dt_from, dt_to, conn=conn)
+
+    if all_data.empty:
+        return {"summaries": pd.DataFrame(), "confidence_raw": pd.DataFrame(), "class_changes": pd.DataFrame()}
+
     summaries_parts: list[pd.DataFrame] = []
     conf_raw_parts: list[pd.DataFrame] = []
     changes_parts: list[pd.DataFrame] = []
 
-    with open_connection(db_cfg) as conn:
-        coils = fetch_coils_in_range(db_cfg, date_from, date_to, conn=conn)
-        for coil_id in coils:
-            df = fetch_coil_data(db_cfg, coil_id, conn=conn)
-            if df.empty:
-                continue
-            stats = compute_coil_stats(coil_id, df)
-            frames = stats_to_frames(stats, label)
-            summaries_parts.append(frames["summary"])
-            if not frames["class_change_top"].empty:
-                changes_parts.append(frames["class_change_top"])
-            raw_conf = stats.get("confidence_raw", pd.DataFrame())
-            if not raw_conf.empty:
-                rc = raw_conf[["defectclass", "confidence"]].copy()
-                rc["coil_id"] = coil_id
-                rc["fetched_at"] = stats["fetched_at"]
-                conf_raw_parts.append(rc)
+    for coil_id, group in all_data.groupby("coilid"):
+        stats = compute_coil_stats(coil_id, group)
+        frames = stats_to_frames(stats, label)
+        summaries_parts.append(frames["summary"])
+        if not frames["class_change_top"].empty:
+            changes_parts.append(frames["class_change_top"])
+        raw_conf = stats.get("confidence_raw", pd.DataFrame())
+        if not raw_conf.empty:
+            rc = raw_conf[["defectclass", "confidence"]].copy()
+            rc["coil_id"] = coil_id
+            rc["fetched_at"] = stats["fetched_at"]
+            conf_raw_parts.append(rc)
 
     return {
         "summaries": pd.concat(summaries_parts, ignore_index=True) if summaries_parts else pd.DataFrame(),
@@ -439,26 +441,35 @@ def render_compare_tab(cfg: AppConfig) -> None:
         st.session_state[_k("active_src")] = source
 
     # ── input controls ────────────────────────────────────────────
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4, c5 = st.columns([2, 1.5, 1, 1.5, 1])
     with c1:
         st.selectbox("Агрегат", options=["(выберите агрегат)"], key=_k("agg"))
     with c2:
         d_from = st.date_input("Дата от", value=date.today() - timedelta(days=7), key=_k("d_from"))
     with c3:
+        t_from = st.time_input("Время от", value=time(0, 0),
+                               step=timedelta(minutes=15), key=_k("t_from"))
+    with c4:
         d_to = st.date_input("Дата до", value=date.today(), key=_k("d_to"))
+    with c5:
+        t_to = st.time_input("Время до", value=time(23, 45),
+                             step=timedelta(minutes=15), key=_k("t_to"))
 
     # ── start analysis button ─────────────────────────────────────
+    dt_from = datetime.combine(d_from, t_from)
+    dt_to = datetime.combine(d_to, t_to)
+
     if st.button("Начать анализ", type="primary", use_container_width=True, key=_k("go")):
         with st.spinner("Загрузка данных..."):
             result: dict[str, dict[str, pd.DataFrame]] = {}
             if source == "Демо":
-                dt_from = pd.Timestamp(datetime.combine(d_from, time(0, 0)), tz="UTC")
-                dt_to = pd.Timestamp(datetime.combine(d_to, time(23, 59)), tz="UTC")
+                ts_from = pd.Timestamp(dt_from, tz="UTC")
+                ts_to = pd.Timestamp(dt_to, tz="UTC")
                 for db_cfg in cfg.databases:
-                    result[db_cfg.label] = _load_for_label(cfg, db_cfg.label, dt_from, dt_to)
+                    result[db_cfg.label] = _load_for_label(cfg, db_cfg.label, ts_from, ts_to)
             else:
                 for db_cfg in cfg.databases:
-                    result[db_cfg.label] = _fetch_db_label(db_cfg, d_from, d_to)
+                    result[db_cfg.label] = _fetch_db_label(db_cfg, dt_from, dt_to)
             st.session_state[_k("result")] = result
 
     # ── guard: no data yet ────────────────────────────────────────

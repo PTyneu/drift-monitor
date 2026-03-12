@@ -9,7 +9,8 @@ import streamlit as st
 from drift.config import load_config
 from drift.compare_page import render_compare_tab
 
-st.set_page_config(page_title="Drift Compare", layout="wide")
+st.set_page_config(page_title="Drift Compare", layout="wide",
+                   menu_items={"Get help": None, "Report a Bug": None, "About": None})
 st.title("Сравнение моделей")
 
 cfg = load_config(st.sidebar.text_input("path_to_config.yaml", value="config.yaml"))
