@@ -20,6 +20,8 @@ import plotly.graph_objects as go
 import streamlit as st
 
 from .config import AppConfig
+from .db import fetch_coils_in_range, fetch_coil_data, open_connection
+from .stats import compute_coil_stats, stats_to_frames
 from .storage import (
     load_all_summaries,
     load_all_confidence_raw,
@@ -32,6 +34,12 @@ _CONF_BINS = [i / 10 for i in range(11)]  # [0.0, 0.1, ..., 1.0]
 _CONF_LABELS = [f"{_CONF_BINS[i]:.1f}-{_CONF_BINS[i+1]:.1f}" for i in range(len(_CONF_BINS) - 1)]
 
 _KEY_PREFIX = "cmp_"  # prefix for all widget keys to avoid collisions
+
+_EMPTY_DATA: dict[str, pd.DataFrame] = {
+    "summaries": pd.DataFrame(),
+    "confidence_raw": pd.DataFrame(),
+    "class_changes": pd.DataFrame(),
+}
 
 
 def _k(name: str) -> str:
@@ -53,6 +61,7 @@ def _filter_by_time(df: pd.DataFrame, dt_from: pd.Timestamp, dt_to: pd.Timestamp
 
 def _load_for_label(cfg: AppConfig, label: str,
                     dt_from: pd.Timestamp, dt_to: pd.Timestamp) -> dict[str, pd.DataFrame]:
+    """Load pre-computed data from parquet storage (demo mode)."""
     labels = [label]
     summaries = _filter_by_time(load_all_summaries(cfg.storage.dir, labels), dt_from, dt_to)
     conf_raw = load_all_confidence_raw(cfg.storage.dir, labels)
@@ -67,6 +76,38 @@ def _load_for_label(cfg: AppConfig, label: str,
         conf_raw = pd.DataFrame()
         changes = pd.DataFrame()
     return {"summaries": summaries, "confidence_raw": conf_raw, "class_changes": changes}
+
+
+def _fetch_db_label(db_cfg, date_from: date, date_to: date) -> dict[str, pd.DataFrame]:
+    """Fetch live data from a real PostgreSQL database."""
+    label = db_cfg.label
+    summaries_parts: list[pd.DataFrame] = []
+    conf_raw_parts: list[pd.DataFrame] = []
+    changes_parts: list[pd.DataFrame] = []
+
+    with open_connection(db_cfg) as conn:
+        coils = fetch_coils_in_range(db_cfg, date_from, date_to, conn=conn)
+        for coil_id in coils:
+            df = fetch_coil_data(db_cfg, coil_id, conn=conn)
+            if df.empty:
+                continue
+            stats = compute_coil_stats(coil_id, df)
+            frames = stats_to_frames(stats, label)
+            summaries_parts.append(frames["summary"])
+            if not frames["class_change_top"].empty:
+                changes_parts.append(frames["class_change_top"])
+            raw_conf = stats.get("confidence_raw", pd.DataFrame())
+            if not raw_conf.empty:
+                rc = raw_conf[["defectclass", "confidence"]].copy()
+                rc["coil_id"] = coil_id
+                rc["fetched_at"] = stats["fetched_at"]
+                conf_raw_parts.append(rc)
+
+    return {
+        "summaries": pd.concat(summaries_parts, ignore_index=True) if summaries_parts else pd.DataFrame(),
+        "confidence_raw": pd.concat(conf_raw_parts, ignore_index=True) if conf_raw_parts else pd.DataFrame(),
+        "class_changes": pd.concat(changes_parts, ignore_index=True) if changes_parts else pd.DataFrame(),
+    }
 
 
 def _load_csv(uploaded_file, fallback_path: str) -> pd.DataFrame | None:
@@ -296,52 +337,169 @@ def _render_single_db(data: dict[str, pd.DataFrame], label: str, selected_classe
     _render_class_changes(changes, selected_classes, title=f"Переклассификация ({label})")
 
 
+def _render_compare_two(data_a: dict, data_b: dict, label_a: str, label_b: str,
+                         selected_classes: list[str]):
+    """Render side-by-side comparison of two data sources."""
+    # Work on copies to avoid mutating session_state
+    data_a = {k: v.copy() if isinstance(v, pd.DataFrame) else v for k, v in data_a.items()}
+    data_b = {k: v.copy() if isinstance(v, pd.DataFrame) else v for k, v in data_b.items()}
+
+    coils_a = set(data_a["summaries"]["coil_id"].unique()) if not data_a["summaries"].empty and "coil_id" in data_a["summaries"].columns else set()
+    coils_b = set(data_b["summaries"]["coil_id"].unique()) if not data_b["summaries"].empty and "coil_id" in data_b["summaries"].columns else set()
+    common_coils = coils_a & coils_b
+    if common_coils:
+        st.info(f"Общих рулонов (coilid): **{len(common_coils)}** из {len(coils_a)} ({label_a}) и {len(coils_b)} ({label_b})")
+    else:
+        st.warning("Нет общих рулонов по coilid. Показываем все данные обеих БД.")
+        common_coils = coils_a | coils_b
+
+    for d in [data_a, data_b]:
+        for key in ("summaries", "confidence_raw", "class_changes"):
+            df = d[key]
+            if not df.empty and "coil_id" in df.columns:
+                d[key] = df[df["coil_id"].isin(common_coils)]
+
+    st.markdown("### Обзор")
+    c1, c2 = st.columns(2)
+    for col, data_x, lbl in [(c1, data_a, label_a), (c2, data_b, label_b)]:
+        with col:
+            st.markdown(f"**{lbl}**")
+            s = data_x["summaries"]
+            if not s.empty and "defectclass" in s.columns:
+                s = s[s["defectclass"].isin(selected_classes)]
+            n = s["coil_id"].nunique() if not s.empty and "coil_id" in s.columns else 0
+            t = s.drop_duplicates(subset=["coil_id"])["total_defects"].sum() if n else 0
+            st.metric("Рулонов", n)
+            st.metric("Всего дефектов", int(t))
+
+    sum_a = data_a["summaries"]
+    sum_b = data_b["summaries"]
+    if not sum_a.empty and "defectclass" in sum_a.columns:
+        sum_a = sum_a[sum_a["defectclass"].isin(selected_classes)]
+    if not sum_b.empty and "defectclass" in sum_b.columns:
+        sum_b = sum_b[sum_b["defectclass"].isin(selected_classes)]
+    _render_class_counts_comparison(_class_counts(sum_a), _class_counts(sum_b), label_a, label_b)
+    _render_confidence_comparison(data_a["confidence_raw"], data_b["confidence_raw"],
+                                  label_a, label_b, selected_classes)
+    _render_reclassification_pct_comparison(data_a["summaries"], data_b["summaries"], label_a, label_b)
+    _render_class_changes_comparison(data_a["class_changes"], data_b["class_changes"],
+                                     label_a, label_b, selected_classes)
+
+
+def _render_csv_comparison(data: dict[str, pd.DataFrame], db_label: str,
+                            csv_df: pd.DataFrame, selected_classes: list[str]):
+    """Render DB vs CSV comparison."""
+    db_sum = data["summaries"]
+    if not db_sum.empty and "defectclass" in db_sum.columns:
+        db_sum = db_sum[db_sum["defectclass"].isin(selected_classes)]
+    csv_filtered = csv_df[csv_df["defectclass"].isin(selected_classes)] if "defectclass" in csv_df.columns else csv_df
+
+    st.markdown("### Обзор")
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(f"**БД ({db_label})**")
+        n_coils = db_sum["coil_id"].nunique() if "coil_id" in db_sum.columns and not db_sum.empty else 0
+        total_db = db_sum.drop_duplicates(subset=["coil_id"])["total_defects"].sum() if n_coils else 0
+        st.metric("Рулонов", n_coils)
+        st.metric("Дефектов (БД)", int(total_db))
+    with c2:
+        st.markdown("**CSV (обучающая выборка)**")
+        st.metric("Записей в CSV", len(csv_filtered))
+
+    _render_class_counts_comparison(_class_counts(csv_filtered), _class_counts(db_sum),
+                                    "CSV", f"БД ({db_label})")
+    _render_confidence_histogram(data["confidence_raw"], selected_classes,
+                                  title=f"Распределение confidence -- только БД ({db_label})")
+    _render_class_changes(data["class_changes"], selected_classes,
+                           title=f"Переклассификация -- только БД ({db_label})")
+
+
 # ── public entry point ───────────────────────────────────────────
 
 
 def render_compare_tab(cfg: AppConfig) -> None:
-    """Render the full comparison UI. Call inside a tab or page context.
+    """Render the full comparison UI.
 
     Does NOT call st.set_page_config or st.title — the caller handles those.
-    Sidebar widgets are placed via ``with st.sidebar:`` so they appear in the
-    shared sidebar of the host app.
     """
     db_labels = [d.label for d in cfg.databases]
 
-    # ── sidebar controls ─────────────────────────────────────────
+    # ── source mode at the top of the page ────────────────────────
+    source = st.radio(
+        "Источник данных",
+        options=["Демо", "БД"],
+        horizontal=True,
+        key=_k("src"),
+    )
+
+    # Reset cached data when source changes
+    if st.session_state.get(_k("active_src")) != source:
+        for stale_key in [_k("result"), _k("mode"), _k("cls")]:
+            st.session_state.pop(stale_key, None)
+        st.session_state[_k("active_src")] = source
+
+    # ── input controls ────────────────────────────────────────────
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        st.selectbox("Агрегат", options=["(выберите агрегат)"], key=_k("agg"))
+    with c2:
+        d_from = st.date_input("Дата от", value=date.today() - timedelta(days=7), key=_k("d_from"))
+    with c3:
+        d_to = st.date_input("Дата до", value=date.today(), key=_k("d_to"))
+
+    # ── start analysis button ─────────────────────────────────────
+    if st.button("Начать анализ", type="primary", use_container_width=True, key=_k("go")):
+        with st.spinner("Загрузка данных..."):
+            result: dict[str, dict[str, pd.DataFrame]] = {}
+            if source == "Демо":
+                dt_from = pd.Timestamp(datetime.combine(d_from, time(0, 0)), tz="UTC")
+                dt_to = pd.Timestamp(datetime.combine(d_to, time(23, 59)), tz="UTC")
+                for db_cfg in cfg.databases:
+                    result[db_cfg.label] = _load_for_label(cfg, db_cfg.label, dt_from, dt_to)
+            else:
+                for db_cfg in cfg.databases:
+                    result[db_cfg.label] = _fetch_db_label(db_cfg, d_from, d_to)
+            st.session_state[_k("result")] = result
+
+    # ── guard: no data yet ────────────────────────────────────────
+    if _k("result") not in st.session_state:
+        st.info("Укажите параметры и нажмите «Начать анализ».")
+        return
+
+    result = st.session_state[_k("result")]
+
+    st.markdown("---")
+
+    # ── sidebar: comparison mode + filters ────────────────────────
+    mode_options = ["Тестовая БД", "Продуктовая БД", "Сравнение двух БД"]
+    if source == "Демо":
+        mode_options.append("Сравнение БД с CSV")
+    else:
+        mode_options.append("Сравнение с CSV")
+
     with st.sidebar:
         st.subheader("Сравнение")
-        mode = st.radio(
-            "Режим сравнения",
-            options=["Тестовая БД", "Продуктовая БД", "Сравнение БД с CSV", "Сравнение двух БД"],
-            key=_k("mode"),
-        )
-        st.markdown("---")
-        d_from = st.date_input("Дата от", value=date.today() - timedelta(days=7), key=_k("d_from"))
-        t_from = st.time_input("Время от", value=time(0, 0), key=_k("t_from"))
-        d_to = st.date_input("Дата до", value=date.today(), key=_k("d_to"))
-        t_to = st.time_input("Время до", value=time(23, 59), key=_k("t_to"))
+        mode = st.radio("Режим отображения", options=mode_options, key=_k("mode"))
 
-    dt_from = pd.Timestamp(datetime.combine(d_from, t_from), tz="UTC")
-    dt_to = pd.Timestamp(datetime.combine(d_to, t_to), tz="UTC")
-
-    # CSV controls (sidebar, visible only in CSV mode)
+    # ── CSV controls (sidebar, visible only in CSV modes) ─────────
     csv_file = None
-    csv_db_label = None
     csv_path_input = "training_data.csv"
-    if mode == "Сравнение БД с CSV":
+    csv_db_label = None
+
+    if mode in ("Сравнение БД с CSV", "Сравнение с CSV"):
         with st.sidebar:
             st.markdown("---")
-            csv_db_label = st.selectbox("БД для сравнения", options=db_labels, key=_k("csv_db"))
+            csv_db_label = st.selectbox("БД для сравнения с CSV", options=db_labels, key=_k("csv_db"))
             csv_file = st.file_uploader("CSV обучающей выборки", type=["csv"], key=_k("csv_up"))
-            csv_path_input = st.text_input("Или путь к CSV", value="training_data.csv", key=_k("csv_path"))
+            if source == "Демо":
+                csv_path_input = st.text_input("Или путь к CSV", value="training_data.csv", key=_k("csv_path"))
 
-    # ── mode dispatch ────────────────────────────────────────────
+    # ── mode dispatch ─────────────────────────────────────────────
 
     if mode in ("Тестовая БД", "Продуктовая БД"):
         role = "test" if mode == "Тестовая БД" else "prod"
         label = _resolve_label(db_labels, role)
-        data = _load_for_label(cfg, label, dt_from, dt_to)
+        data = result.get(label, _EMPTY_DATA)
         all_classes = _get_all_classes(data["summaries"])
         with st.sidebar:
             st.markdown("---")
@@ -351,45 +509,6 @@ def render_compare_tab(cfg: AppConfig) -> None:
             st.warning("Выберите хотя бы один класс.")
         else:
             _render_single_db(data, label, selected_classes)
-
-    elif mode == "Сравнение БД с CSV":
-        db_label = csv_db_label or db_labels[0]
-        data = _load_for_label(cfg, db_label, dt_from, dt_to)
-        csv_df = _load_csv(csv_file, csv_path_input)
-        if csv_df is None:
-            st.warning("CSV-файл не найден. Загрузите файл или укажите путь.")
-        else:
-            all_classes = _get_all_classes(data["summaries"], csv_df)
-            with st.sidebar:
-                st.markdown("---")
-                selected_classes = st.multiselect("Классы дефектов", options=all_classes,
-                                                   default=all_classes, key=_k("cls"))
-            if not selected_classes:
-                st.warning("Выберите хотя бы один класс.")
-            else:
-                db_sum = data["summaries"]
-                if not db_sum.empty and "defectclass" in db_sum.columns:
-                    db_sum = db_sum[db_sum["defectclass"].isin(selected_classes)]
-                csv_filtered = csv_df[csv_df["defectclass"].isin(selected_classes)] if "defectclass" in csv_df.columns else csv_df
-
-                st.markdown("### Обзор")
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.markdown(f"**БД ({db_label})**")
-                    n_coils = db_sum["coil_id"].nunique() if "coil_id" in db_sum.columns and not db_sum.empty else 0
-                    total_db = db_sum.drop_duplicates(subset=["coil_id"])["total_defects"].sum() if n_coils else 0
-                    st.metric("Рулонов", n_coils)
-                    st.metric("Дефектов (БД)", int(total_db))
-                with c2:
-                    st.markdown("**CSV (обучающая выборка)**")
-                    st.metric("Записей в CSV", len(csv_filtered))
-
-                _render_class_counts_comparison(_class_counts(csv_filtered), _class_counts(db_sum),
-                                                "CSV", f"БД ({db_label})")
-                _render_confidence_histogram(data["confidence_raw"], selected_classes,
-                                              title=f"Распределение confidence -- только БД ({db_label})")
-                _render_class_changes(data["class_changes"], selected_classes,
-                                       title=f"Переклассификация -- только БД ({db_label})")
 
     elif mode == "Сравнение двух БД":
         label_a = _resolve_label(db_labels, "test")
@@ -401,23 +520,8 @@ def render_compare_tab(cfg: AppConfig) -> None:
                 label_b = st.selectbox("БД B", options=db_labels,
                                         index=min(1, len(db_labels) - 1), key=_k("db_b"))
 
-        data_a = _load_for_label(cfg, label_a, dt_from, dt_to)
-        data_b = _load_for_label(cfg, label_b, dt_from, dt_to)
-
-        coils_a = set(data_a["summaries"]["coil_id"].unique()) if not data_a["summaries"].empty and "coil_id" in data_a["summaries"].columns else set()
-        coils_b = set(data_b["summaries"]["coil_id"].unique()) if not data_b["summaries"].empty and "coil_id" in data_b["summaries"].columns else set()
-        common_coils = coils_a & coils_b
-        if common_coils:
-            st.info(f"Общих рулонов (coilid): **{len(common_coils)}** из {len(coils_a)} (A) и {len(coils_b)} (B)")
-        else:
-            st.warning("Нет общих рулонов по coilid. Показываем все данные обеих БД.")
-            common_coils = coils_a | coils_b
-
-        for d in [data_a, data_b]:
-            for key in ("summaries", "confidence_raw", "class_changes"):
-                df = d[key]
-                if not df.empty and "coil_id" in df.columns:
-                    d[key] = df[df["coil_id"].isin(common_coils)]
+        data_a = result.get(label_a, _EMPTY_DATA)
+        data_b = result.get(label_b, _EMPTY_DATA)
 
         all_classes = _get_all_classes(data_a["summaries"], data_b["summaries"])
         with st.sidebar:
@@ -427,28 +531,29 @@ def render_compare_tab(cfg: AppConfig) -> None:
         if not selected_classes:
             st.warning("Выберите хотя бы один класс.")
         else:
-            st.markdown("### Обзор")
-            c1, c2 = st.columns(2)
-            for col, data_x, lbl in [(c1, data_a, label_a), (c2, data_b, label_b)]:
-                with col:
-                    st.markdown(f"**{lbl}**")
-                    s = data_x["summaries"]
-                    if not s.empty and "defectclass" in s.columns:
-                        s = s[s["defectclass"].isin(selected_classes)]
-                    n = s["coil_id"].nunique() if not s.empty and "coil_id" in s.columns else 0
-                    t = s.drop_duplicates(subset=["coil_id"])["total_defects"].sum() if n else 0
-                    st.metric("Рулонов", n)
-                    st.metric("Всего дефектов", int(t))
+            _render_compare_two(data_a, data_b, label_a, label_b, selected_classes)
 
-            sum_a = data_a["summaries"]
-            sum_b = data_b["summaries"]
-            if "defectclass" in sum_a.columns:
-                sum_a = sum_a[sum_a["defectclass"].isin(selected_classes)]
-            if not sum_b.empty and "defectclass" in sum_b.columns:
-                sum_b = sum_b[sum_b["defectclass"].isin(selected_classes)]
-            _render_class_counts_comparison(_class_counts(sum_a), _class_counts(sum_b), label_a, label_b)
-            _render_confidence_comparison(data_a["confidence_raw"], data_b["confidence_raw"],
-                                          label_a, label_b, selected_classes)
-            _render_reclassification_pct_comparison(data_a["summaries"], data_b["summaries"], label_a, label_b)
-            _render_class_changes_comparison(data_a["class_changes"], data_b["class_changes"],
-                                             label_a, label_b, selected_classes)
+    elif mode in ("Сравнение БД с CSV", "Сравнение с CSV"):
+        db_label = csv_db_label or db_labels[0]
+        data = result.get(db_label, _EMPTY_DATA)
+
+        if source == "Демо":
+            csv_df = _load_csv(csv_file, csv_path_input)
+        else:
+            csv_df = _load_csv(csv_file, "")
+
+        if csv_df is None:
+            if source == "БД":
+                st.warning("Загрузите CSV-файл обучающей выборки.")
+            else:
+                st.warning("CSV-файл не найден. Загрузите файл или укажите путь.")
+        else:
+            all_classes = _get_all_classes(data["summaries"], csv_df)
+            with st.sidebar:
+                st.markdown("---")
+                selected_classes = st.multiselect("Классы дефектов", options=all_classes,
+                                                   default=all_classes, key=_k("cls"))
+            if not selected_classes:
+                st.warning("Выберите хотя бы один класс.")
+            else:
+                _render_csv_comparison(data, db_label, csv_df, selected_classes)

@@ -12,5 +12,5 @@ from drift.compare_page import render_compare_tab
 st.set_page_config(page_title="Drift Compare", layout="wide")
 st.title("Сравнение моделей")
 
-cfg = load_config(st.sidebar.text_input("Путь к config.yaml", value="config.yaml"))
+cfg = load_config(st.sidebar.text_input("path_to_config.yaml", value="config.yaml"))
 render_compare_tab(cfg)
